@@ -70,7 +70,7 @@ pub use config::EngineConfig;
 pub use error::{Error, Result};
 pub use state::EngineState;
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
@@ -82,7 +82,7 @@ use state::SharedState;
 /// Cheap to clone — all state is behind an `Arc`.
 #[derive(Clone)]
 pub struct LanguageToolEngine {
-    config: Arc<EngineConfig>,
+    config: Arc<RwLock<EngineConfig>>,
     state: SharedState,
     server: Arc<Mutex<Option<ServerProcess>>>,
 }
@@ -91,9 +91,29 @@ impl LanguageToolEngine {
     /// Create a new engine with the given configuration.
     pub fn new(config: EngineConfig) -> Self {
         Self {
-            config: Arc::new(config),
+            config: Arc::new(RwLock::new(config)),
             state: SharedState::new(),
             server: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Replace the data directory and re-probe install state.
+    ///
+    /// Call this from `setup()` once the app handle is available, passing the
+    /// bundle-scoped per-user application-data directory resolved via
+    /// `app.path().app_data_dir()`. The engine appends its own `languagetool/`
+    /// subdirectory, matching what `EngineConfig::default_for_app_with_dir` does.
+    pub fn set_data_dir(&self, app_data_dir: std::path::PathBuf) {
+        let new_data_dir = app_data_dir.join("languagetool");
+        let mut cfg = self.config.write().unwrap();
+        cfg.data_dir = new_data_dir;
+        drop(cfg);
+        // Re-probe install state so is_installed() reflects the new location.
+        let installed = provision::is_installed(&self.config.read().unwrap());
+        if !installed {
+            self.state.set(EngineState::NotInstalled);
+        } else if self.state.get() == EngineState::NotInstalled {
+            self.state.set(EngineState::Stopped);
         }
     }
 
@@ -104,7 +124,7 @@ impl LanguageToolEngine {
 
     /// Returns `true` if LanguageTool is installed (provisioned) on this machine.
     pub fn is_installed(&self) -> bool {
-        provision::is_installed(&self.config)
+        provision::is_installed(&self.config.read().unwrap())
     }
 
     /// Returns `true` if the engine is currently `Ready` and accepting checks.
@@ -125,7 +145,8 @@ impl LanguageToolEngine {
     /// - n-gram datasets are **never** downloaded.
     pub async fn provision(&self, on_progress: impl Fn(EngineState) + Send + 'static) -> Result<()> {
         self.state.set(EngineState::Downloading { downloaded: 0, total: None });
-        let result = provision::provision(&self.config, &self.state, &on_progress).await;
+        let cfg = self.config.read().unwrap().clone();
+        let result = provision::provision(&cfg, &self.state, &on_progress).await;
         match &result {
             Ok(()) => {
                 // After a successful provision, transition to Stopped (ready to start).
@@ -149,14 +170,16 @@ impl LanguageToolEngine {
             return Err(Error::Provision("call provision() before start()".into()));
         }
 
+        let cfg = self.config.read().unwrap().clone();
+
         // Restore java_path from version.json if this is a fresh process that
         // never ran provision() (e.g. app restart with LT already installed).
         if self.state.java_path().is_none() {
-            provision::restore_java_path(&self.config, &self.state);
+            provision::restore_java_path(&cfg, &self.state);
         }
 
         self.state.set(EngineState::Starting);
-        let server = match ServerProcess::spawn(&self.config, &self.state).await {
+        let server = match ServerProcess::spawn(&cfg, &self.state).await {
             Ok(s) => s,
             Err(e) => {
                 self.state.set(EngineState::Error { message: e.to_string() });
@@ -169,7 +192,7 @@ impl LanguageToolEngine {
         *guard = Some(server);
         drop(guard);
 
-        match wait_for_ready(port, self.config.startup_timeout, &self.state).await {
+        match wait_for_ready(port, cfg.startup_timeout, &self.state).await {
             Ok(()) => {
                 info!("LT engine ready on port {port}");
                 Ok(())
@@ -252,5 +275,16 @@ mod tests {
         let result = engine.provision(|_| {}).await;
         assert!(result.is_err());
         assert!(matches!(engine.state(), EngineState::Error { .. }));
+    }
+
+    #[test]
+    fn set_data_dir_updates_path_and_state() {
+        let engine = LanguageToolEngine::new(test_config());
+        let new_base = tempfile::tempdir().unwrap();
+        engine.set_data_dir(new_base.path().to_path_buf());
+        let cfg = engine.config.read().unwrap();
+        assert_eq!(cfg.data_dir, new_base.path().join("languagetool"));
+        // Not installed in the fresh temp dir → state should be NotInstalled.
+        assert_eq!(engine.state(), EngineState::NotInstalled);
     }
 }
