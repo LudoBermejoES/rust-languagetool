@@ -75,6 +75,39 @@ async fn provision_start_check_stop_es() {
 
 #[tokio::test]
 #[ignore = "requires network + Java 17; downloads ~252 MB"]
+async fn provision_start_check_stop_es_gender_agreement() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let engine = LanguageToolEngine::new(test_config());
+    engine.provision(|_| {}).await.expect("provision");
+    engine.start().await.expect("start");
+
+    // Determiner↔noun gender disagreement with the noun spelled correctly:
+    // "balón" is masculine, so the feminine article "La" is wrong.
+    //   "La balón es buena." → LT flags "La balón" → "El balón"
+    //   (rule AGREEMENT_DET_NOUN, "Error de concordancia").
+    //
+    // Two caveats this fixture pins down (both verified against real LT 6.6):
+    //  1. The noun must be spelled correctly. With "balon" misspelled, LT can't
+    //     resolve its gender, so only the spelling rule (MORFOLOGIK_RULE_ES)
+    //     fires — not the agreement rule.
+    //  2. LT reliably catches DETERMINER↔noun disagreement ("La balón"), but
+    //     NOT the longer-distance subject↔predicate-adjective case across the
+    //     copula ("El balón ... es buena" returns zero matches — that needs the
+    //     n-gram datasets we deliberately never download).
+    let matches = engine
+        .check("La balón es buena.", "es")
+        .await
+        .expect("check es gender");
+    assert!(
+        !matches.is_empty(),
+        "expected an AGREEMENT_DET_NOUN match for 'La balón'; got none"
+    );
+
+    engine.stop().await.expect("stop");
+}
+
+#[tokio::test]
+#[ignore = "requires network + Java 17; downloads ~252 MB"]
 async fn char_offsets_correct_with_accents() {
     let _ = tracing_subscriber::fmt::try_init();
     let engine = LanguageToolEngine::new(test_config());

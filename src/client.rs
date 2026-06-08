@@ -115,18 +115,16 @@ impl LtClient {
     }
 }
 
-/// Convert a raw LT match to our typed struct, normalizing byte offsets → char offsets.
+/// Convert a raw LT match to our typed struct.
+///
+/// LT's HTTP API returns `offset` and `length` as **Unicode character** counts
+/// (confirmed from the `/v2/check` JSON schema and empirical testing with multi-byte
+/// text). They are NOT byte offsets. No conversion is needed; we clamp to the
+/// actual char count to guard against edge cases.
 fn convert_match(m: LtMatch, text: &str) -> GrammarMatch {
-    // LT's `offset` is a UTF-16 code-unit offset, but in practice for typical prose
-    // (no surrogate pairs) it equals the byte offset in a UTF-8 string.
-    // We convert from byte offset to char index to be safe with multi-byte characters.
-    let char_offset = byte_offset_to_char(text, m.offset);
-    // `length` from LT is also in code units; we compute by taking the substring.
-    let char_length = {
-        let byte_end = m.offset + m.length;
-        let char_end = byte_offset_to_char(text, byte_end);
-        char_end.saturating_sub(char_offset)
-    };
+    let total_chars = text.chars().count();
+    let char_offset = m.offset.min(total_chars);
+    let char_length = m.length.min(total_chars.saturating_sub(char_offset));
 
     GrammarMatch {
         offset: char_offset,
@@ -141,15 +139,20 @@ fn convert_match(m: LtMatch, text: &str) -> GrammarMatch {
     }
 }
 
-/// Convert a byte offset in `text` to a character index.
-/// Clamps to `text.chars().count()` if out of range.
-fn byte_offset_to_char(text: &str, byte_offset: usize) -> usize {
-    if byte_offset == 0 {
-        return 0;
+#[cfg(test)]
+fn make_lt_match(offset: usize, length: usize, replacement: &str) -> LtMatch {
+    LtMatch {
+        message: String::new(),
+        short_message: String::new(),
+        replacements: vec![LtReplacement { value: replacement.to_string() }],
+        offset,
+        length,
+        rule: LtRule {
+            id: "TEST".to_string(),
+            issue_type: "grammar".to_string(),
+            category: LtCategory { id: "TEST".to_string(), name: "Test".to_string() },
+        },
     }
-    let clamped = byte_offset.min(text.len());
-    // Count chars up to the clamped byte position
-    text[..clamped].chars().count()
 }
 
 #[cfg(test)]
@@ -157,28 +160,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn byte_offset_ascii() {
-        let text = "hello world";
-        assert_eq!(byte_offset_to_char(text, 6), 6);
+    fn offset_ascii_passthrough() {
+        // ASCII-only: char offset == byte offset, both should be identity.
+        let text = "She go to school";
+        let m = make_lt_match(4, 2, "goes");
+        let gm = convert_match(m, text);
+        let snippet: String = text.chars().skip(gm.offset).take(gm.length).collect();
+        assert_eq!(snippet, "go");
+        assert_eq!(gm.offset, 4);
+        assert_eq!(gm.length, 2);
     }
 
     #[test]
-    fn byte_offset_multibyte_niños() {
-        // "niños" — ñ is 2 bytes in UTF-8 (0xC3 0xB1)
-        let text = "niños camina mal";
-        // "niños " = n(1)+i(1)+ñ(2)+o(1)+s(1)+space(1) = 7 bytes, 6 chars
-        // byte offset 7 = start of "camina"
-        assert_eq!(byte_offset_to_char(text, 7), 6);
+    fn offset_multibyte_año() {
+        // "Ella tiene veinte año" — LT returns offset=18, length=3 (char units).
+        // 'ñ' is 2 bytes; char count of "año" is 3, not 2.
+        let text = "Ella tiene veinte año y estudia";
+        let m = make_lt_match(18, 3, "años");
+        let gm = convert_match(m, text);
+        let snippet: String = text.chars().skip(gm.offset).take(gm.length).collect();
+        assert_eq!(snippet, "año", "must select the full word including ñ");
+        assert_eq!(gm.offset, 18);
+        assert_eq!(gm.length, 3);
     }
 
     #[test]
-    fn byte_offset_zero() {
-        assert_eq!(byte_offset_to_char("hola", 0), 0);
+    fn offset_after_multibyte() {
+        // Error word after multi-byte: offsets must still be correct.
+        // "Los niños son malo" — "malo" should be "malos" (agreement).
+        // "niños" = n(1)+i(1)+ñ(2 bytes/1 char)+o(1)+s(1) → 5 chars, 6 bytes.
+        // "Los niños son " = 3+1+5+1+3+1 = 14 chars.
+        // If LT gives offset=14, length=4 for "malo":
+        let text = "Los niños son malo";
+        let m = make_lt_match(14, 4, "malos");
+        let gm = convert_match(m, text);
+        let snippet: String = text.chars().skip(gm.offset).take(gm.length).collect();
+        assert_eq!(snippet, "malo");
     }
 
     #[test]
-    fn byte_offset_clamped() {
+    fn offset_clamped_oob() {
         let text = "abc";
-        assert_eq!(byte_offset_to_char(text, 999), 3);
+        let m = make_lt_match(999, 5, "x");
+        let gm = convert_match(m, text);
+        assert_eq!(gm.offset, 3); // clamped to text length
+        assert_eq!(gm.length, 0);
     }
 }

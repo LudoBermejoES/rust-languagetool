@@ -64,6 +64,19 @@ impl EngineConfig {
             lt_sha256,
         ))
     }
+
+    /// Like [`default_for_app`] but with an explicit data directory (for hosts
+    /// that already resolve their own app-data path, e.g. via Tauri's path API).
+    /// `data_dir` should be the app-level data directory; a `languagetool/`
+    /// sub-directory is created inside it.
+    pub fn default_for_app_with_dir(data_dir: PathBuf) -> Self {
+        Self::new(
+            data_dir.join("languagetool"),
+            "6.6",
+            "https://languagetool.org/download/LanguageTool-6.6.zip",
+            "",  // SHA-256 left empty by default; set via lt_sha256 field after construction
+        )
+    }
 }
 
 /// Returns a Temurin 17 JRE download URL for the current platform, if known.

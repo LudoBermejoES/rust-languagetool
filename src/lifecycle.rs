@@ -1,8 +1,9 @@
 use std::net::TcpListener;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::process::{Child, Command};
+use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::config::EngineConfig;
@@ -60,7 +61,7 @@ impl ServerProcess {
 
     /// Kill the child process gracefully (then forcefully if needed).
     pub async fn stop(&self) {
-        let mut guard = self.child.lock().unwrap();
+        let mut guard = self.child.lock().await;
         if let Some(mut child) = guard.take() {
             info!("Stopping LT server (port {})", self.port);
             // tokio Child::kill sends SIGKILL; try graceful via /quit first
@@ -72,17 +73,17 @@ impl ServerProcess {
                 .await;
             // Give it a moment to exit cleanly
             tokio::time::sleep(Duration::from_millis(800)).await;
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            let _: std::io::Result<()> = child.kill().await;
+            let _: std::io::Result<std::process::ExitStatus> = child.wait().await;
         }
     }
 
     /// Check if the child has exited (indicates a crash while running).
     #[allow(dead_code)]
     pub async fn has_exited(&self) -> bool {
-        let mut guard = self.child.lock().unwrap();
+        let mut guard = self.child.lock().await;
         if let Some(ref mut child) = *guard {
-            matches!(child.try_wait(), Ok(Some(_)))
+            matches!(child.try_wait(), Ok(Some(_)) | Err(_))
         } else {
             true
         }
