@@ -48,6 +48,14 @@ pub fn is_installed(cfg: &EngineConfig) -> bool {
         && (cfg.lt_sha256.is_empty() || v.lt_sha256 == cfg.lt_sha256)
 }
 
+/// Restore the java_path from version.json without running a full provision.
+/// Used on app restart when LT is already installed but state is fresh.
+pub fn restore_java_path(cfg: &EngineConfig, state: &SharedState) {
+    if let Ok(v) = read_version_json(&cfg.data_dir) {
+        state.set_java(v.java_path, v.using_system_java);
+    }
+}
+
 /// Run the full provision flow: detect/download Java, download+verify+unzip LT.
 pub async fn provision(
     cfg: &EngineConfig,

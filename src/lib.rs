@@ -149,6 +149,12 @@ impl LanguageToolEngine {
             return Err(Error::Provision("call provision() before start()".into()));
         }
 
+        // Restore java_path from version.json if this is a fresh process that
+        // never ran provision() (e.g. app restart with LT already installed).
+        if self.state.java_path().is_none() {
+            provision::restore_java_path(&self.config, &self.state);
+        }
+
         self.state.set(EngineState::Starting);
         let server = match ServerProcess::spawn(&self.config, &self.state).await {
             Ok(s) => s,
