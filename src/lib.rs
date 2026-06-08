@@ -97,6 +97,11 @@ impl LanguageToolEngine {
         }
     }
 
+    /// Returns the current data directory used by this engine.
+    pub fn data_dir(&self) -> std::path::PathBuf {
+        self.config.read().unwrap().data_dir.clone()
+    }
+
     /// Replace the data directory and re-probe install state.
     ///
     /// Call this from `setup()` once the app handle is available, passing the
