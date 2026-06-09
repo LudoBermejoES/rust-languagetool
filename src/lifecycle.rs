@@ -36,7 +36,8 @@ impl ServerProcess {
 
         info!("Spawning LT server on 127.0.0.1:{port} via {java}");
 
-        let child = Command::new(&java)
+        let mut command = Command::new(&java);
+        command
             .args([
                 "-cp",
                 &jar.to_string_lossy(),
@@ -48,8 +49,14 @@ impl ServerProcess {
             ])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)  // tokio kill-on-drop
-            .spawn()?;
+            .kill_on_drop(true); // tokio kill-on-drop
+
+        // On Windows, launching the JVM from a GUI app otherwise pops a console
+        // window. CREATE_NO_WINDOW (0x0800_0000) suppresses it.
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000);
+
+        let child = command.spawn()?;
 
         state.set_port(port);
         Ok(Self { child: Arc::new(Mutex::new(Some(child))), port })
