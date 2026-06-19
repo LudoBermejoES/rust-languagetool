@@ -184,6 +184,14 @@ impl LanguageToolEngine {
         }
 
         self.state.set(EngineState::Starting);
+
+        // Kill any orphaned LT servers from a previous run before spawning a fresh
+        // one, so java HTTPServer processes never pile up.
+        crate::lifecycle::reap_stray_servers(&crate::provision::server_jar_path(
+            &cfg.data_dir,
+            &cfg.lt_version,
+        ));
+
         let server = match ServerProcess::spawn(&cfg, &self.state).await {
             Ok(s) => s,
             Err(e) => {

@@ -19,6 +19,52 @@ pub fn acquire_free_port() -> Result<u16> {
     Ok(port)
 }
 
+/// Kill any stray LanguageTool `HTTPServer` java processes started against THIS
+/// app's server jar (orphaned by a previous run SIGKILLed before its graceful
+/// shutdown — common under `tauri dev`/Ctrl-C). Scoped by the jar path so we
+/// never touch unrelated java processes.
+///
+/// Best-effort and Unix-only; a no-op elsewhere (the graceful exit handler
+/// covers the normal case there).
+#[cfg(unix)]
+pub fn reap_stray_servers(jar_path: &std::path::Path) {
+    use std::process::Command;
+    let jar = jar_path.to_string_lossy();
+    // Match java procs running the LT HTTPServer.
+    let out = match Command::new("pgrep")
+        .args(["-f", "org.languagetool.server.HTTPServer"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+    let my_pid = std::process::id();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let pid: u32 = match line.trim().parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if pid == my_pid {
+            continue;
+        }
+        // Confirm this PID's argv references our jar before killing.
+        let argv = Command::new("ps")
+            .args(["-o", "command=", "-p", &pid.to_string()])
+            .output()
+            .ok();
+        let matches_jar = argv
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(jar.as_ref()))
+            .unwrap_or(false);
+        if matches_jar {
+            info!("Reaping stray LanguageTool server (pid {pid})");
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub fn reap_stray_servers(_jar_path: &std::path::Path) {}
+
 pub(crate) struct ServerProcess {
     child: Arc<Mutex<Option<Child>>>,
     port: u16,
