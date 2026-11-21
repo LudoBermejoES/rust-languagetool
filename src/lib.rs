@@ -249,8 +249,42 @@ impl LanguageToolEngine {
             state: self.state.get().to_string(),
         })?;
         let lt = client::LtClient::new(port);
-        lt.check(text, language, disabled_rules, disabled_categories, &self.state)
-            .await
+        let result = lt
+            .check(text, language, disabled_rules, disabled_categories, &self.state)
+            .await;
+        if let Err(Error::Http(e)) = &result {
+            if e.is_timeout() || e.is_connect() {
+                self.recover_if_unresponsive(port).await;
+            }
+        }
+        result
+    }
+
+    /// After a check timed out or could not connect: if the server also fails
+    /// a health probe, it hung or died while the state still said `Ready`.
+    /// Stop it, so the state reflects reality, and start a fresh one in the
+    /// background. A merely slow check (probe answers) changes nothing.
+    async fn recover_if_unresponsive(&self, port: u16) {
+        let probe = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}/v2/languages"))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await;
+        if probe.is_ok_and(|r| r.status().is_success()) {
+            return;
+        }
+        // Only the first failing check restarts; concurrent ones see a non-Ready state.
+        if !self.state.replace_if(&EngineState::Ready, EngineState::Stopped) {
+            return;
+        }
+        error!("LT server on port {port} stopped responding; restarting");
+        self.stop().await.ok();
+        let engine = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = engine.start().await {
+                error!("LT restart failed: {e}");
+            }
+        });
     }
 }
 
@@ -272,6 +306,27 @@ mod tests {
             Error::NotReady { .. } => {}
             other => panic!("expected NotReady, got {other}"),
         }
+    }
+
+    /// A server that accepts connections and never answers, while the state
+    /// still says Ready: the engine must stop claiming to be ready.
+    #[tokio::test]
+    async fn hung_server_is_no_longer_reported_ready() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = listener.accept().await {
+                held.push(s);
+            }
+        });
+        let engine = LanguageToolEngine::new(test_config());
+        engine.state.set_port(port);
+        engine.state.set(EngineState::Ready);
+        assert!(engine.is_ready());
+
+        engine.recover_if_unresponsive(port).await;
+        assert!(!engine.is_ready(), "state must reflect the unresponsive server");
     }
 
     #[tokio::test]

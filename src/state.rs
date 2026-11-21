@@ -72,6 +72,17 @@ impl SharedState {
         self.inner.lock().unwrap().state = state;
     }
 
+    /// Set `to` only if the state is currently `from`; true when it changed.
+    pub fn replace_if(&self, from: &EngineState, to: EngineState) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if &inner.state == from {
+            inner.state = to;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn port(&self) -> Option<u16> {
         self.inner.lock().unwrap().port
     }
